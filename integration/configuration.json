@@ -1,0 +1,44 @@
+{
+  "secrets": [
+    {
+      "name": "INCODE_CLIENT_ID",
+      "label": "Incode OIDC Client ID",
+      "description": "Your Incode Workforce OIDC client ID. Found in the Incode Workforce Dashboard under your OIDC client settings."
+    },
+    {
+      "name": "INCODE_CLIENT_SECRET",
+      "label": "Incode OIDC Client Secret",
+      "description": "Your Incode Workforce OIDC client secret. Found in the Incode Workforce Dashboard under your OIDC client settings."
+    }
+  ],
+  "configuration": [
+    {
+      "name": "INCODE_AUTH_SERVER",
+      "label": "Incode Auth Server URL",
+      "description": "The base URL of the Incode Workforce OIDC authorization server.",
+      "default_value": "https://auth.demo.incode.com",
+      "options": [
+        {
+          "value": "https://auth.demo.incode.com",
+          "label": "Demo"
+        },
+        {
+          "value": "https://auth.incode.com",
+          "label": "Production"
+        }
+      ]
+    },
+    {
+      "name": "AUTH0_DOMAIN",
+      "label": "Auth0 Domain",
+      "description": "Your Auth0 tenant domain, used to build the /continue redirect URI. Example: your-tenant.us.auth0.com (no https://)."
+    },
+    {
+      "name": "SCOPES",
+      "label": "OIDC Scopes",
+      "description": "Space-separated OIDC scopes to request from Incode.",
+      "default_value": "openid"
+    }
+  ],
+  "dependencies": []
+}
