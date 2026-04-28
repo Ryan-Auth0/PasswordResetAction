@@ -12,6 +12,19 @@
  *   - If no incode_identity_id exists, the password reset is blocked and the
  *     user is instructed to log in first to establish their identity.
  *   - Only allows the password reset to proceed if auth_overall_status === "OK".
+ *   - Verifies the returned identity_id matches the enrolled identity to prevent
+ *     identity substitution attacks.
+ *
+ * Required Secrets (event.secrets):
+ *   INCODE_CLIENT_ID      — OIDC client ID (from Incode Workforce dashboard)
+ *   INCODE_CLIENT_SECRET  — OIDC client secret (from Incode Workforce dashboard)
+ *
+ * Required Configuration (event.configuration):
+ *   INCODE_AUTH_SERVER    — Incode OIDC auth server base URL
+ *                           Demo:       https://auth.demo.incode.com
+ *                           Production: https://auth.incode.com
+ *   AUTH0_DOMAIN          — Your Auth0 tenant domain (e.g. "your-tenant.us.auth0.com")
+ *   SCOPES                — Space-separated OIDC scopes (e.g. "openid")
  *
  * @param {Event} event - Details about the user and the password reset context.
  * @param {PostChallengeAPI} api - Interface whose methods can be used to change the behavior of the flow.
@@ -47,9 +60,60 @@ async function exchangeCodeForTokens(code, redirectUri, tokenEndpoint, event) {
   return resp.json();
 }
 
+/**
+ * Verifies the JWT signature of the Incode ID token using the JWKS endpoint.
+ *
+ * Trust assumption: tokens received directly over TLS from Incode's token
+ * endpoint are implicitly trusted per the OIDC spec (section 3.1.3.7).
+ * This additional signature verification provides defense-in-depth against
+ * token substitution attacks in case the token is intercepted or tampered
+ * with before reaching this handler.
+ */
+async function verifyIdToken(idToken, jwksUri) {
+  const jwksResp = await fetch(jwksUri);
+  if (!jwksResp.ok) {
+    throw new Error(`Failed to fetch JWKS (${jwksResp.status})`);
+  }
+  const jwks = await jwksResp.json();
+
+  const [headerB64] = idToken.split(".");
+  const header = JSON.parse(Buffer.from(headerB64, "base64url").toString("utf8"));
+
+  const jwk = jwks.keys.find(k => k.kid === header.kid);
+  if (!jwk) {
+    throw new Error(`No matching JWK found for kid: ${header.kid}`);
+  }
+
+  const publicKey = await crypto.subtle.importKey(
+    "jwk",
+    jwk,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["verify"]
+  );
+
+  const [, payloadB64, signatureB64] = idToken.split(".");
+  const signingInput = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+  const signature = Buffer.from(signatureB64, "base64url");
+
+  const valid = await crypto.subtle.verify(
+    "RSASSA-PKCS1-v1_5",
+    publicKey,
+    signature,
+    signingInput
+  );
+
+  if (!valid) {
+    throw new Error("ID token signature verification failed");
+  }
+
+  return JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
+}
+
 // ─── Main handler ─────────────────────────────────────────────────────────────
 
 exports.onExecutePostChallenge = async (event, api) => {
+  // Read non-sensitive values from event.configuration
   const authServer   = event.configuration.INCODE_AUTH_SERVER || DEFAULT_AUTH_SERVER;
   const authEndpoint = `${authServer}/oauth2/authorize`;
   const scopes       = event.configuration.SCOPES || "openid";
@@ -69,6 +133,8 @@ exports.onExecutePostChallenge = async (event, api) => {
   }
 
   // ── Build redirect URI ───────────────────────────────────────────────────
+  // Register https://<AUTH0_DOMAIN>/continue as an allowed redirect URI
+  // in your Incode Workforce OIDC client settings.
   const redirectUri = `https://${auth0Domain}/continue`;
 
   // ── Build OIDC authorization URL ─────────────────────────────────────────
@@ -90,8 +156,10 @@ exports.onExecutePostChallenge = async (event, api) => {
 // ─── Continuation handler ─────────────────────────────────────────────────────
 
 exports.onContinuePostChallenge = async (event, api) => {
+  // Read non-sensitive values from event.configuration
   const authServer    = event.configuration.INCODE_AUTH_SERVER || DEFAULT_AUTH_SERVER;
   const tokenEndpoint = `${authServer}/oauth2/token`;
+  const jwksUri       = `${authServer}/oauth2/jwks`;
   const auth0Domain   = event.configuration.AUTH0_DOMAIN;
   const redirectUri   = `https://${auth0Domain}/continue`;
 
@@ -120,16 +188,18 @@ exports.onContinuePostChallenge = async (event, api) => {
     );
   }
 
-  // ── Parse ID token claims ────────────────────────────────────────────────
+  // ── Verify ID token signature against Incode's JWKS endpoint ────────────
+  // Defense-in-depth: although tokens received directly over TLS from the
+  // token endpoint are implicitly trusted per OIDC spec (section 3.1.3.7),
+  // we verify the signature to guard against token substitution attacks.
   let idTokenClaims = {};
   try {
-    const idTokenPayload = tokenResponse.id_token.split(".")[1];
-    idTokenClaims = JSON.parse(Buffer.from(idTokenPayload, "base64url").toString("utf8"));
+    idTokenClaims = await verifyIdToken(tokenResponse.id_token, jwksUri);
   } catch (err) {
-    console.warn("[Incode Face Auth] ID token parse failed:", err.message);
+    console.error("[Incode Face Auth] ID token verification failed:", err.message);
     return api.access.deny(
       "face_auth_failed",
-      "Identity verification result could not be read. Please try again."
+      "Identity verification result could not be verified. Please try again."
     );
   }
 
